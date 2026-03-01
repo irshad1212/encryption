@@ -14,8 +14,6 @@ import {
     RefreshCw,
     Zap,
     Shield,
-    ShieldCheck,
-    Fingerprint,
     BookOpen,
     XCircle,
 } from "lucide-react";
@@ -60,14 +58,8 @@ import {
     validatePassword,
 } from "@/lib/crypto-config";
 import { generatePassphrase, passphraseEntropy } from "@/lib/diceware";
-import {
-    isWebAuthnAvailable,
-    isPlatformAuthenticatorAvailable,
-    registerCredential,
-    getCredentialSecret,
-    combineWithPassword,
-    hasCredentials,
-} from "@/lib/webauthn";
+import { combineWithPassword } from "@/lib/webauthn";
+import { hasBackupKeyFlag } from "@/lib/crypto";
 
 type Stage = "idle" | "deriving-key" | "encrypting" | "decrypting" | "done" | "error";
 
@@ -110,11 +102,13 @@ export default function TextPage() {
     const [dicewareResult, setDicewareResult] = useState("");
     const [dicewareCopied, setDicewareCopied] = useState(false);
 
-    // WebAuthn
-    const [webauthnEnabled, setWebauthnEnabled] = useState(false);
-    const [webauthnAvailable, setWebauthnAvailable] = useState(false);
-    const [webauthnHasCreds, setWebauthnHasCreds] = useState(false);
-    const [webauthnStatus, setWebauthnStatus] = useState("");
+    // Secret key
+    const [secretKeyEnabled, setSecretKeyEnabled] = useState(false);
+    const [generatedSecretKey, setGeneratedSecretKey] = useState("");
+    const [secretKeyDialogOpen, setSecretKeyDialogOpen] = useState(false);
+    const [secretKeyCopied, setSecretKeyCopied] = useState(false);
+    const [decSecretKey, setDecSecretKey] = useState("");
+    const [decSecretKeyDetected, setDecSecretKeyDetected] = useState(false);
 
     const encWorkerRef = useRef<Worker | null>(null);
     const decWorkerRef = useRef<Worker | null>(null);
@@ -126,14 +120,7 @@ export default function TextPage() {
     const genCrackTime = estimateCrackTime(genEntropy);
     const dicewareEntropyBits = passphraseEntropy(dicewareWords);
 
-    useEffect(() => {
-        if (isWebAuthnAvailable()) {
-            setWebauthnAvailable(true);
-            isPlatformAuthenticatorAvailable().then((ok) => {
-                if (ok) hasCredentials().then(setWebauthnHasCreds);
-            });
-        }
-    }, []);
+
 
     // Auto-clear sensitive outputs
     useEffect(() => {
@@ -161,16 +148,7 @@ export default function TextPage() {
         setTimeout(() => setter(false), 2000);
     };
 
-    const handleRegisterWebAuthn = async () => {
-        try {
-            setWebauthnStatus("Registering...");
-            await registerCredential("Text Encryption Key");
-            setWebauthnHasCreds(true);
-            setWebauthnStatus("✓ Registered");
-        } catch (err) {
-            setWebauthnStatus(`✗ ${err instanceof Error ? err.message : "Failed"}`);
-        }
-    };
+
 
     const handleEncrypt = async () => {
         if (!plaintext || !encPassword) return;
@@ -182,10 +160,17 @@ export default function TextPage() {
 
         try {
             let effectivePassword = encPassword;
-            if (webauthnEnabled && webauthnHasCreds) {
-                const secret = await getCredentialSecret();
-                effectivePassword = await combineWithPassword(encPassword, secret);
+            let secretKey = "";
+
+            if (secretKeyEnabled) {
+                const keyBytes = new Uint8Array(32);
+                crypto.getRandomValues(keyBytes);
+                secretKey = btoa(String.fromCharCode(...keyBytes));
+                effectivePassword = await combineWithPassword(encPassword, keyBytes);
+                keyBytes.fill(0);
             }
+
+            const encConfig = { ...config, backupKeyFlag: secretKeyEnabled };
 
             if (typeof Worker !== "undefined") {
                 const worker = new Worker(new URL("@/workers/crypto.worker.ts", import.meta.url));
@@ -195,15 +180,27 @@ export default function TextPage() {
                     if (err) { setEncStage("error"); setEncError(err); worker.terminate(); return; }
                     setEncStage(s as Stage);
                     setEncProgress(p);
-                    if (s === "done" && result) { setEncOutput(result); worker.terminate(); setTimeout(() => setEncPassword(""), 0); }
+                    if (s === "done" && result) {
+                        setEncOutput(result);
+                        worker.terminate();
+                        setTimeout(() => setEncPassword(""), 0);
+                        if (secretKey) {
+                            setGeneratedSecretKey(secretKey);
+                            setSecretKeyDialogOpen(true);
+                        }
+                    }
                 };
                 worker.onerror = (err) => { setEncStage("error"); setEncError(err.message); worker.terminate(); };
-                worker.postMessage({ type: "encrypt-text", data: plaintext, password: effectivePassword, id: Date.now().toString(), config });
+                worker.postMessage({ type: "encrypt-text", data: plaintext, password: effectivePassword, id: Date.now().toString(), config: encConfig });
             } else {
                 const { encryptText } = await import("@/lib/crypto");
-                const result = await encryptText(plaintext, effectivePassword, config, (p) => { setEncStage(p.stage as Stage); setEncProgress(p.progress); });
+                const result = await encryptText(plaintext, effectivePassword, encConfig, (p) => { setEncStage(p.stage as Stage); setEncProgress(p.progress); });
                 setEncOutput(result);
                 setTimeout(() => setEncPassword(""), 0);
+                if (secretKey) {
+                    setGeneratedSecretKey(secretKey);
+                    setSecretKeyDialogOpen(true);
+                }
             }
         } catch (err) {
             setEncStage("error");
@@ -220,9 +217,11 @@ export default function TextPage() {
 
         try {
             let effectivePassword = decPassword;
-            if (webauthnEnabled && webauthnHasCreds) {
-                const secret = await getCredentialSecret();
-                effectivePassword = await combineWithPassword(decPassword, secret);
+
+            if (decSecretKeyDetected && decSecretKey) {
+                const keyBytes = Uint8Array.from(atob(decSecretKey), c => c.charCodeAt(0));
+                effectivePassword = await combineWithPassword(decPassword, keyBytes);
+                keyBytes.fill(0);
             }
 
             if (typeof Worker !== "undefined") {
@@ -299,7 +298,7 @@ export default function TextPage() {
                                         <div key={i} className="flex items-start gap-1.5 text-xs text-destructive"><XCircle className="h-3 w-3 mt-0.5 shrink-0" /><span>{err}</span></div>
                                     ))}
                                     {encValidation.valid && (
-                                        <div className="flex items-center gap-1.5 text-xs text-emerald-600"><ShieldCheck className="h-3 w-3" /><span>Meets security requirements</span></div>
+                                        <div className="flex items-center gap-1.5 text-xs text-emerald-600"><Shield className="h-3 w-3" /><span>Meets security requirements</span></div>
                                     )}
                                 </div>
                             )}
@@ -502,30 +501,105 @@ export default function TextPage() {
                 </DialogContent>
             </Dialog>
 
-            {/* WebAuthn — shown on both tabs */}
-            {webauthnAvailable && (
+            {/* Secret Key — Second Factor */}
+            <Card>
+                <CardHeader>
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                            <Shield className="h-4 w-4 text-muted-foreground" />
+                            <CardTitle className="text-base">Secret Key</CardTitle>
+                            {secretKeyEnabled && <Badge variant="secondary" className="text-xs">Enabled</Badge>}
+                        </div>
+                        <Switch
+                            checked={secretKeyEnabled}
+                            onCheckedChange={setSecretKeyEnabled}
+                        />
+                    </div>
+                    <CardDescription className="text-xs">
+                        {secretKeyEnabled
+                            ? "A unique secret key will be generated after encryption. You'll need it to decrypt."
+                            : "Add a second factor — a generated secret key required alongside your password to decrypt"
+                        }
+                    </CardDescription>
+                </CardHeader>
+            </Card>
+
+            {/* Secret Key Display Dialog */}
+            <Dialog open={secretKeyDialogOpen} onOpenChange={(open) => {
+                if (!open) setGeneratedSecretKey("");
+                setSecretKeyDialogOpen(open);
+            }}>
+                <DialogContent className="sm:max-w-lg">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                            <Shield className="h-5 w-5" />
+                            Your Secret Key
+                        </DialogTitle>
+                        <DialogDescription>
+                            Save this key securely. You will need it alongside your password to decrypt.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4 py-2">
+                        <div className="flex items-center gap-3 rounded-lg border border-border bg-muted px-4 py-3">
+                            <span className="flex-1 font-mono text-sm tracking-widest select-none">
+                                {"•".repeat(32)}
+                            </span>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="shrink-0 h-8 gap-1.5"
+                                onClick={() => handleCopy(generatedSecretKey, setSecretKeyCopied)}
+                            >
+                                {secretKeyCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                                {secretKeyCopied ? "Copied" : "Copy"}
+                            </Button>
+                        </div>
+                        <Alert>
+                            <AlertTriangle className="h-4 w-4" />
+                            <AlertDescription className="text-xs">
+                                This key is shown only once. If you lose it, the encrypted text cannot be recovered.
+                            </AlertDescription>
+                        </Alert>
+                    </div>
+                    <div className="flex justify-end pt-2">
+                        <Button
+                            size="sm"
+                            onClick={() => {
+                                setSecretKeyDialogOpen(false);
+                                setGeneratedSecretKey("");
+                            }}
+                        >
+                            I've saved the key
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            {/* Secret Key input for decryption — auto-detected */}
+            {decSecretKeyDetected && (
                 <Card>
                     <CardHeader>
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2"><Fingerprint className="h-4 w-4 text-muted-foreground" /><CardTitle className="text-base">Hardware 2nd Factor</CardTitle></div>
-                            <Switch checked={webauthnEnabled} onCheckedChange={setWebauthnEnabled} />
+                        <div className="flex items-center gap-2">
+                            <Shield className="h-4 w-4 text-muted-foreground" />
+                            <CardTitle className="text-base">Secret Key Required</CardTitle>
+                            <Badge variant="secondary" className="text-xs">Detected</Badge>
                         </div>
-                        <CardDescription className="text-xs">Optional: combine password with a hardware key</CardDescription>
+                        <CardDescription className="text-xs">
+                            This text was encrypted with a secret key. Paste it below to decrypt.
+                        </CardDescription>
                     </CardHeader>
-                    {webauthnEnabled && (
-                        <CardContent className="space-y-3">
-                            {!webauthnHasCreds ? (
-                                <Button variant="outline" size="sm" className="w-full text-xs gap-2" onClick={handleRegisterWebAuthn}>
-                                    <Fingerprint className="h-3.5 w-3.5" />Register Hardware Key
-                                </Button>
-                            ) : (
-                                <div className="flex items-center gap-1.5 text-xs text-emerald-600"><ShieldCheck className="h-3 w-3" /><span>Hardware key registered</span></div>
-                            )}
-                            {webauthnStatus && <p className="text-xs text-muted-foreground">{webauthnStatus}</p>}
-                        </CardContent>
-                    )}
+                    <CardContent>
+                        <Input
+                            type="password"
+                            placeholder="Paste your secret key"
+                            value={decSecretKey}
+                            onChange={(e) => setDecSecretKey(e.target.value)}
+                            className="font-mono text-sm"
+                        />
+                    </CardContent>
                 </Card>
             )}
+
         </div>
     );
 }

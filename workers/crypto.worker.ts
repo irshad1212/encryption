@@ -29,6 +29,7 @@ interface WorkerCryptoConfig {
     saltLength: number;
     ivLength: number;
     hashAlgorithm: string;
+    backupKeyFlag?: boolean;
 }
 
 const DEFAULT_CONFIG: WorkerCryptoConfig = {
@@ -60,8 +61,8 @@ function wipeBuffer(buffer: ArrayBuffer | Uint8Array): void {
     view.fill(0);
 }
 
-function encodeConfigByte(): number {
-    return (0 << 4) | 2; // AES-256-GCM | SHA-512
+function encodeConfigByte(backupKeyFlag?: boolean): number {
+    return ((backupKeyFlag ? 0x80 : 0) | (0 << 4) | 2); // AES-256-GCM | SHA-512 | backup flag
 }
 
 function decodeConfigLegacyV2(byte: number): { algorithm: string; hashAlgorithm: string } {
@@ -132,7 +133,7 @@ function buildV4Header(config: WorkerCryptoConfig): Uint8Array {
     const header = new Uint8Array(V4_HEADER_SIZE);
     header[0] = BLOB_VERSION;
     header[1] = config.kdf === "argon2id" ? KDF_ARGON2ID : KDF_PBKDF2;
-    header[2] = encodeConfigByte();
+    header[2] = encodeConfigByte(config.backupKeyFlag);
     header[3] = config.saltLength;
     header[4] = config.ivLength;
     const mem = config.argon2Memory;

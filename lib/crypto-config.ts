@@ -16,6 +16,8 @@ export interface CryptoConfig {
     saltLength: number;
     ivLength: number;
     hashAlgorithm: "SHA-512";
+    // Backup key flag (set when a backup key was used as 2nd factor)
+    backupKeyFlag?: boolean;
 }
 
 // Hardened defaults: Argon2id primary KDF

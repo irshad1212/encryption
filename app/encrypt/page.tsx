@@ -63,12 +63,7 @@ import {
 } from "@/lib/crypto-config";
 import { generatePassphrase, passphraseEntropy } from "@/lib/diceware";
 import {
-    isWebAuthnAvailable,
-    isPlatformAuthenticatorAvailable,
-    registerCredential,
-    getCredentialSecret,
     combineWithPassword,
-    hasCredentials,
 } from "@/lib/webauthn";
 import {
     getSystemCapabilities,
@@ -107,11 +102,11 @@ export default function EncryptPage() {
     const [dicewareResult, setDicewareResult] = useState("");
     const [dicewareCopied, setDicewareCopied] = useState(false);
 
-    // WebAuthn
-    const [webauthnEnabled, setWebauthnEnabled] = useState(false);
-    const [webauthnAvailable, setWebauthnAvailable] = useState(false);
-    const [webauthnHasCreds, setWebauthnHasCreds] = useState(false);
-    const [webauthnStatus, setWebauthnStatus] = useState("");
+    // Secret key
+    const [backupKeyEnabled, setBackupKeyEnabled] = useState(false);
+    const [generatedBackupKey, setGeneratedBackupKey] = useState("");
+    const [backupKeyDialogOpen, setBackupKeyDialogOpen] = useState(false);
+    const [backupKeyCopied, setBackupKeyCopied] = useState(false);
 
     const passwordValidation = validatePassword(password);
     const genEntropy = estimateGeneratorEntropy(genConfig);
@@ -128,12 +123,6 @@ export default function EncryptPage() {
                 ? `${(limits.maxFileSizeMB / 1024).toFixed(1)} GB`
                 : `${limits.maxFileSizeMB} MB`
         );
-        if (isWebAuthnAvailable()) {
-            setWebauthnAvailable(true);
-            isPlatformAuthenticatorAvailable().then((ok) => {
-                if (ok) hasCredentials().then(setWebauthnHasCreds);
-            });
-        }
     }, []);
 
     const handleFile = useCallback(
@@ -170,17 +159,6 @@ export default function EncryptPage() {
         setTimeout(() => setter(false), 2000);
     };
 
-    const handleRegisterWebAuthn = async () => {
-        try {
-            setWebauthnStatus("Registering hardware key...");
-            await registerCredential("Encryption Key");
-            setWebauthnHasCreds(true);
-            setWebauthnStatus("✓ Hardware key registered");
-        } catch (err) {
-            setWebauthnStatus(`✗ ${err instanceof Error ? err.message : "Failed"}`);
-        }
-    };
-
     const handleEncrypt = async () => {
         if (!file || !password) return;
         if (!passwordValidation.valid) {
@@ -194,11 +172,19 @@ export default function EncryptPage() {
 
         try {
             let effectivePassword = password;
-            if (webauthnEnabled && webauthnHasCreds) {
-                setStatusMsg("Authenticating with hardware key...");
-                const secret = await getCredentialSecret();
-                effectivePassword = await combineWithPassword(password, secret);
+            let backupKey = "";
+
+            if (backupKeyEnabled) {
+                // Generate a random 32-byte backup key
+                const keyBytes = new Uint8Array(32);
+                crypto.getRandomValues(keyBytes);
+                backupKey = btoa(String.fromCharCode(...keyBytes));
+                effectivePassword = await combineWithPassword(password, keyBytes);
+                keyBytes.fill(0);
             }
+
+            // Set the backup key flag in config
+            const encConfig = { ...config, backupKeyFlag: backupKeyEnabled };
 
             const arrayBuffer = await file.arrayBuffer();
 
@@ -223,17 +209,21 @@ export default function EncryptPage() {
                         URL.revokeObjectURL(url);
                         worker.terminate();
                         setTimeout(() => setPassword(""), 0);
+                        if (backupKey) {
+                            setGeneratedBackupKey(backupKey);
+                            setBackupKeyDialogOpen(true);
+                        }
                     }
                 };
 
                 worker.onerror = (err) => { setStage("error"); setError(err.message || "Encryption failed"); worker.terminate(); };
                 worker.postMessage(
-                    { type: "encrypt-file", data: arrayBuffer, password: effectivePassword, id: Date.now().toString(), config },
+                    { type: "encrypt-file", data: arrayBuffer, password: effectivePassword, id: Date.now().toString(), config: encConfig },
                     [arrayBuffer]
                 );
             } else {
                 const { encryptData } = await import("@/lib/crypto");
-                const result = await encryptData(arrayBuffer, effectivePassword, config, (p) => {
+                const result = await encryptData(arrayBuffer, effectivePassword, encConfig, (p) => {
                     setStage(p.stage as Stage);
                     setProgress(p.progress);
                     setStatusMsg(p.message);
@@ -458,37 +448,79 @@ export default function EncryptPage() {
                 </CardContent>
             </Card>
 
-            {/* WebAuthn Second Factor */}
-            {webauthnAvailable && (
-                <Card>
-                    <CardHeader>
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                                <Fingerprint className="h-4 w-4 text-muted-foreground" />
-                                <CardTitle className="text-base">Hardware 2nd Factor</CardTitle>
-                            </div>
-                            <Switch checked={webauthnEnabled} onCheckedChange={setWebauthnEnabled} />
+            {/* Secret Key — Second Factor */}
+            <Card>
+                <CardHeader>
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                            <Shield className="h-4 w-4 text-muted-foreground" />
+                            <CardTitle className="text-base">Secret Key</CardTitle>
+                            {backupKeyEnabled && <Badge variant="secondary" className="text-xs">Enabled</Badge>}
                         </div>
-                        <CardDescription className="text-xs">
-                            Optional: combine password with a hardware key to resist offline brute-force
-                        </CardDescription>
-                    </CardHeader>
-                    {webauthnEnabled && (
-                        <CardContent className="space-y-3">
-                            {!webauthnHasCreds ? (
-                                <Button variant="outline" size="sm" className="w-full text-xs gap-2" onClick={handleRegisterWebAuthn}>
-                                    <Fingerprint className="h-3.5 w-3.5" />Register Hardware Key
-                                </Button>
-                            ) : (
-                                <div className="flex items-center gap-1.5 text-xs text-emerald-600">
-                                    <ShieldCheck className="h-3 w-3" /><span>Hardware key registered — will be used during encryption</span>
-                                </div>
-                            )}
-                            {webauthnStatus && <p className="text-xs text-muted-foreground">{webauthnStatus}</p>}
-                        </CardContent>
-                    )}
-                </Card>
-            )}
+                        <Switch
+                            checked={backupKeyEnabled}
+                            onCheckedChange={setBackupKeyEnabled}
+                        />
+                    </div>
+                    <CardDescription className="text-xs">
+                        {backupKeyEnabled
+                            ? "A unique secret key will be generated after encryption. You'll need it to decrypt."
+                            : "Add a second factor — a generated secret key required alongside your password to decrypt"
+                        }
+                    </CardDescription>
+                </CardHeader>
+            </Card>
+
+            {/* Secret Key Display Dialog — shown after successful encryption */}
+            <Dialog open={backupKeyDialogOpen} onOpenChange={(open) => {
+                if (!open) setGeneratedBackupKey("");
+                setBackupKeyDialogOpen(open);
+            }}>
+                <DialogContent className="sm:max-w-lg">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                            <Shield className="h-5 w-5" />
+                            Your Secret Key
+                        </DialogTitle>
+                        <DialogDescription>
+                            Save this key securely. You will need it alongside your password to decrypt this file.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4 py-2">
+                        <div className="flex items-center gap-3 rounded-lg border border-border bg-muted px-4 py-3">
+                            <span className="flex-1 font-mono text-sm tracking-widest select-none">
+                                {"•".repeat(32)}
+                            </span>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="shrink-0 h-8 gap-1.5"
+                                onClick={() => handleCopy(generatedBackupKey, setBackupKeyCopied)}
+                            >
+                                {backupKeyCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                                {backupKeyCopied ? "Copied" : "Copy"}
+                            </Button>
+                        </div>
+                        <Alert>
+                            <AlertTriangle className="h-4 w-4" />
+                            <AlertDescription className="text-xs">
+                                This key is shown only once. If you lose it, the encrypted file cannot be recovered.
+                            </AlertDescription>
+                        </Alert>
+                    </div>
+                    <div className="flex justify-end pt-2">
+                        <Button
+                            size="sm"
+                            onClick={() => {
+                                setBackupKeyDialogOpen(false);
+                                setGeneratedBackupKey("");
+                            }}
+                        >
+                            I've saved the key
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
 
             {/* Advanced Configuration — summary card with edit dialog */}
             <Card>

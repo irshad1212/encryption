@@ -34,14 +34,19 @@ export function wipeBuffer(buffer: ArrayBuffer | Uint8Array): void {
     view.fill(0);
 }
 
-// Config byte: high nibble = algorithm, low nibble = hash
-function encodeConfigByte(): number {
-    // Only AES-256-GCM (0) and SHA-512 (2) supported
-    return (0 << 4) | 2;
+// Config byte: bit7 = backup key flag, bits 4-6 = algorithm, bits 0-3 = hash
+function encodeConfigByte(backupKeyFlag?: boolean): number {
+    // AES-256-GCM (0) | SHA-512 (2) | backup key flag in bit 7
+    return ((backupKeyFlag ? 0x80 : 0) | (0 << 4) | 2);
 }
 
 function decodeConfigByte(byte: number): { algorithm: CryptoConfig["algorithm"]; hashAlgorithm: CryptoConfig["hashAlgorithm"] } {
     return { algorithm: "AES-256-GCM", hashAlgorithm: "SHA-512" };
+}
+
+/** Check if the config byte has the backup key flag set */
+export function hasBackupKeyFlag(configByte: number): boolean {
+    return (configByte & 0x80) !== 0;
 }
 
 // For legacy v2 decryption
@@ -124,7 +129,7 @@ export async function encryptData(
     const header = new Uint8Array(V4_HEADER_SIZE);
     header[0] = BLOB_VERSION;
     header[1] = config.kdf === "argon2id" ? KDF_ARGON2ID : KDF_PBKDF2;
-    header[2] = encodeConfigByte();
+    header[2] = encodeConfigByte(config.backupKeyFlag);
     header[3] = config.saltLength;
     header[4] = config.ivLength;
     const mem = config.argon2Memory;

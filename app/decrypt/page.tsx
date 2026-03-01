@@ -16,7 +16,7 @@ import {
     Check,
     Zap,
     ShieldCheck,
-    Fingerprint,
+    Shield,
     BookOpen,
     Lock,
 } from "lucide-react";
@@ -59,12 +59,9 @@ import {
 } from "@/lib/crypto-config";
 import { generatePassphrase, passphraseEntropy } from "@/lib/diceware";
 import {
-    isWebAuthnAvailable,
-    isPlatformAuthenticatorAvailable,
-    getCredentialSecret,
     combineWithPassword,
-    hasCredentials,
 } from "@/lib/webauthn";
+import { hasBackupKeyFlag } from "@/lib/crypto";
 
 type Stage = "idle" | "deriving-key" | "decrypting" | "done" | "error";
 
@@ -94,10 +91,9 @@ export default function DecryptPage() {
     const [dicewareResult, setDicewareResult] = useState("");
     const [dicewareCopied, setDicewareCopied] = useState(false);
 
-    // WebAuthn
-    const [webauthnEnabled, setWebauthnEnabled] = useState(false);
-    const [webauthnAvailable, setWebauthnAvailable] = useState(false);
-    const [webauthnHasCreds, setWebauthnHasCreds] = useState(false);
+    // Secret key (auto-detected from file header)
+    const [backupKeyDetected, setBackupKeyDetected] = useState(false);
+    const [backupKey, setBackupKey] = useState("");
 
     const genEntropy = estimateGeneratorEntropy(genConfig);
     const genEntropyInfo = getEntropyLabel(genEntropy);
@@ -111,12 +107,6 @@ export default function DecryptPage() {
         setMaxFileSizeLabel(
             limits.maxFileSizeMB >= 1024 ? `${(limits.maxFileSizeMB / 1024).toFixed(1)} GB` : `${limits.maxFileSizeMB} MB`
         );
-        if (isWebAuthnAvailable()) {
-            setWebauthnAvailable(true);
-            isPlatformAuthenticatorAvailable().then((ok) => {
-                if (ok) hasCredentials().then(setWebauthnHasCreds);
-            });
-        }
     }, []);
 
     const handleFile = useCallback((f: File) => {
@@ -129,6 +119,19 @@ export default function DecryptPage() {
         setStage("idle");
         setProgress(0);
         setStatusMsg("");
+
+        // Auto-detect secret key flag from header byte[2]
+        const reader = new FileReader();
+        reader.onload = () => {
+            const arr = new Uint8Array(reader.result as ArrayBuffer);
+            // v4 header: byte[0] = version (4), byte[2] = config byte
+            if (arr.length >= 10 && arr[0] === 4) {
+                setBackupKeyDetected(hasBackupKeyFlag(arr[2]));
+            } else {
+                setBackupKeyDetected(false);
+            }
+        };
+        reader.readAsArrayBuffer(f.slice(0, 10));
     }, [maxFileSize, maxFileSizeLabel]);
 
     const handleDrop = useCallback(
@@ -166,10 +169,10 @@ export default function DecryptPage() {
 
         try {
             let effectivePassword = password;
-            if (webauthnEnabled && webauthnHasCreds) {
-                setStatusMsg("Authenticating with hardware key...");
-                const secret = await getCredentialSecret();
-                effectivePassword = await combineWithPassword(password, secret);
+            if (backupKeyDetected && backupKey) {
+                const keyBytes = Uint8Array.from(atob(backupKey), c => c.charCodeAt(0));
+                effectivePassword = await combineWithPassword(password, keyBytes);
+                keyBytes.fill(0);
             }
 
             const arrayBuffer = await file.arrayBuffer();
@@ -350,23 +353,28 @@ export default function DecryptPage() {
                 </CardContent>
             </Card>
 
-            {/* WebAuthn */}
-            {webauthnAvailable && webauthnHasCreds && (
+            {/* Secret Key — auto-detected from file header */}
+            {backupKeyDetected && (
                 <Card>
                     <CardHeader>
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2"><Fingerprint className="h-4 w-4 text-muted-foreground" /><CardTitle className="text-base">Hardware 2nd Factor</CardTitle></div>
-                            <Switch checked={webauthnEnabled} onCheckedChange={setWebauthnEnabled} />
+                        <div className="flex items-center gap-2">
+                            <Shield className="h-4 w-4 text-muted-foreground" />
+                            <CardTitle className="text-base">Secret Key Required</CardTitle>
+                            <Badge variant="secondary" className="text-xs">Detected</Badge>
                         </div>
-                        <CardDescription className="text-xs">Enable if the file was encrypted with a hardware key</CardDescription>
+                        <CardDescription className="text-xs">
+                            This file was encrypted with a secret key. Paste it below to decrypt.
+                        </CardDescription>
                     </CardHeader>
-                    {webauthnEnabled && (
-                        <CardContent>
-                            <div className="flex items-center gap-1.5 text-xs text-emerald-600">
-                                <ShieldCheck className="h-3 w-3" /><span>Hardware key will be used during decryption</span>
-                            </div>
-                        </CardContent>
-                    )}
+                    <CardContent>
+                        <Input
+                            type="password"
+                            placeholder="Paste your secret key"
+                            value={backupKey}
+                            onChange={(e) => setBackupKey(e.target.value)}
+                            className="font-mono text-sm"
+                        />
+                    </CardContent>
                 </Card>
             )}
 
