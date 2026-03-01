@@ -67,7 +67,7 @@ export default function DashboardPage() {
         </Badge>
         <Badge variant="secondary" className="gap-1.5">
           <Lock className="h-3 w-3" />
-          PBKDF2 · 250K iterations
+          Argon2id · WASM KDF
         </Badge>
         <Badge variant="secondary" className="gap-1.5">
           <Globe className="h-3 w-3" />

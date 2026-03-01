@@ -268,7 +268,7 @@ export default function EncryptPage() {
             <div className="space-y-1">
                 <h1 className="text-2xl font-bold tracking-tight">Encrypt File</h1>
                 <p className="text-sm text-muted-foreground">
-                    AES-256-GCM with PBKDF2-SHA512 · Header authentication via AAD
+                    AES-256-GCM with Argon2id WASM KDF · Chunked encryption · AAD-verified
                 </p>
             </div>
 

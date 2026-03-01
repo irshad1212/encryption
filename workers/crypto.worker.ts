@@ -16,6 +16,8 @@ const SUPPORTED_VERSIONS = new Set([0x01, 0x02, 0x03, 0x04]);
 const V4_HEADER_SIZE = 10;
 const KDF_ARGON2ID = 0x01;
 const KDF_PBKDF2 = 0x02;
+const CHUNK_SIZE = 64 * 1024 * 1024; // 64 MiB per chunk
+const IV_LEN = 12;
 
 interface WorkerCryptoConfig {
     algorithm: string;
@@ -150,35 +152,84 @@ _workerCtx.onmessage = async (e: MessageEvent) => {
 
     try {
         switch (type) {
-            // ─── ENCRYPT FILE ────────────────────────────────────────
+            // ─── ENCRYPT FILE (chunked) ──────────────────────────────
             case "encrypt-file": {
                 const kdfLabel = config.kdf === "argon2id"
                     ? `Argon2id (${(config.argon2Memory / 1024).toFixed(0)} MiB, ${config.argon2Passes}p)`
                     : `PBKDF2 (${config.iterations.toLocaleString()} itr)`;
 
-                _workerCtx.postMessage({ id, stage: "deriving-key", progress: 10, message: `Deriving key: ${kdfLabel}...` });
+                _workerCtx.postMessage({ id, stage: "deriving-key", progress: 5, message: `Deriving key: ${kdfLabel}...` });
 
                 const salt = getRandomBytes(config.saltLength);
-                const iv = getRandomBytes(config.ivLength);
                 const key = await deriveKey(password, salt, config);
                 const header = buildV4Header(config);
 
-                _workerCtx.postMessage({ id, stage: "encrypting", progress: 40, message: "Encrypting with AES-256-GCM (AAD)..." });
+                const inputView = new Uint8Array(data);
+                const totalBytes = inputView.byteLength;
+                const numChunks = Math.max(1, Math.ceil(totalBytes / CHUNK_SIZE));
 
-                const ciphertext = await crypto.subtle.encrypt(
-                    { name: "AES-GCM", iv: iv.buffer as ArrayBuffer, additionalData: header.buffer as ArrayBuffer },
-                    key,
-                    data
-                );
+                _workerCtx.postMessage({ id, stage: "encrypting", progress: 15, message: `Encrypting ${numChunks} chunk(s)...` });
 
-                const blob = new Uint8Array(V4_HEADER_SIZE + config.saltLength + config.ivLength + ciphertext.byteLength);
-                blob.set(header, 0);
-                blob.set(salt, V4_HEADER_SIZE);
-                blob.set(iv, V4_HEADER_SIZE + config.saltLength);
-                blob.set(new Uint8Array(ciphertext), V4_HEADER_SIZE + config.saltLength + config.ivLength);
+                // Pre-calculate output size: header + salt + chunk_count(4) + chunks
+                // Each chunk: IV(12) + ciphertext_len(4) + ciphertext (plaintext + 16 GCM tag)
+                const chunkOutputs: { iv: Uint8Array; ct: Uint8Array }[] = [];
+                let totalCtBytes = 0;
+
+                for (let i = 0; i < numChunks; i++) {
+                    const chunkStart = i * CHUNK_SIZE;
+                    const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, totalBytes);
+                    const chunkData = inputView.slice(chunkStart, chunkEnd);
+                    const chunkIv = getRandomBytes(IV_LEN);
+
+                    // Per-chunk AAD: header || chunk_index(4 bytes BE)
+                    const aad = new Uint8Array(V4_HEADER_SIZE + 4);
+                    aad.set(header, 0);
+                    aad[V4_HEADER_SIZE] = (i >> 24) & 0xff;
+                    aad[V4_HEADER_SIZE + 1] = (i >> 16) & 0xff;
+                    aad[V4_HEADER_SIZE + 2] = (i >> 8) & 0xff;
+                    aad[V4_HEADER_SIZE + 3] = i & 0xff;
+
+                    const ct = await crypto.subtle.encrypt(
+                        { name: "AES-GCM", iv: chunkIv.buffer as ArrayBuffer, additionalData: aad.buffer as ArrayBuffer },
+                        key,
+                        chunkData.buffer as ArrayBuffer
+                    );
+                    wipeBuffer(chunkData);
+
+                    chunkOutputs.push({ iv: chunkIv, ct: new Uint8Array(ct) });
+                    totalCtBytes += IV_LEN + 4 + ct.byteLength;
+
+                    const pct = 15 + Math.round(((i + 1) / numChunks) * 80);
+                    _workerCtx.postMessage({ id, stage: "encrypting", progress: pct, message: `Encrypted chunk ${i + 1}/${numChunks}` });
+                }
+
+                // Assemble: header(10) + salt(N) + chunk_count(4) + chunks
+                const blobSize = V4_HEADER_SIZE + config.saltLength + 4 + totalCtBytes;
+                const blob = new Uint8Array(blobSize);
+                let offset = 0;
+                blob.set(header, offset); offset += V4_HEADER_SIZE;
+                blob.set(salt, offset); offset += config.saltLength;
+                // chunk count (4 bytes BE)
+                blob[offset] = (numChunks >> 24) & 0xff;
+                blob[offset + 1] = (numChunks >> 16) & 0xff;
+                blob[offset + 2] = (numChunks >> 8) & 0xff;
+                blob[offset + 3] = numChunks & 0xff;
+                offset += 4;
+
+                for (const { iv: cIv, ct } of chunkOutputs) {
+                    blob.set(cIv, offset); offset += IV_LEN;
+                    // ciphertext length (4 bytes BE)
+                    const ctLen = ct.byteLength;
+                    blob[offset] = (ctLen >> 24) & 0xff;
+                    blob[offset + 1] = (ctLen >> 16) & 0xff;
+                    blob[offset + 2] = (ctLen >> 8) & 0xff;
+                    blob[offset + 3] = ctLen & 0xff;
+                    offset += 4;
+                    blob.set(ct, offset); offset += ctLen;
+                    wipeBuffer(cIv); wipeBuffer(ct);
+                }
 
                 wipeBuffer(salt);
-                wipeBuffer(iv);
                 wipeBuffer(data);
 
                 _workerCtx.postMessage(
@@ -203,7 +254,7 @@ _workerCtx.onmessage = async (e: MessageEvent) => {
                 break;
             }
 
-            // ─── ENCRYPT TEXT ────────────────────────────────────────
+            // ─── ENCRYPT TEXT (chunked format, single chunk) ───────
             case "encrypt-text": {
                 const kdfLabel = config.kdf === "argon2id"
                     ? `Argon2id (${(config.argon2Memory / 1024).toFixed(0)} MiB)`
@@ -214,26 +265,41 @@ _workerCtx.onmessage = async (e: MessageEvent) => {
                 const encoder = new TextEncoder();
                 const textData = encoder.encode(data);
                 const salt = getRandomBytes(config.saltLength);
-                const iv = getRandomBytes(config.ivLength);
+                const chunkIv = getRandomBytes(IV_LEN);
                 const key = await deriveKey(password, salt, config);
                 const header = buildV4Header(config);
 
                 _workerCtx.postMessage({ id, stage: "encrypting", progress: 50, message: "Encrypting with AES-256-GCM (AAD)..." });
 
-                const ciphertext = await crypto.subtle.encrypt(
-                    { name: "AES-GCM", iv: iv.buffer as ArrayBuffer, additionalData: header.buffer as ArrayBuffer },
+                // Per-chunk AAD: header || chunk_index(0)
+                const aad = new Uint8Array(V4_HEADER_SIZE + 4);
+                aad.set(header, 0);
+                // chunk index 0 = all zeros (already initialized)
+
+                const ct = await crypto.subtle.encrypt(
+                    { name: "AES-GCM", iv: chunkIv.buffer as ArrayBuffer, additionalData: aad.buffer as ArrayBuffer },
                     key,
                     textData
                 );
+                const ctArr = new Uint8Array(ct);
 
-                const blob = new Uint8Array(V4_HEADER_SIZE + config.saltLength + config.ivLength + ciphertext.byteLength);
-                blob.set(header, 0);
-                blob.set(salt, V4_HEADER_SIZE);
-                blob.set(iv, V4_HEADER_SIZE + config.saltLength);
-                blob.set(new Uint8Array(ciphertext), V4_HEADER_SIZE + config.saltLength + config.ivLength);
+                // Build chunked blob: header + salt + chunk_count(1) + [iv + len + ct]
+                const blobSize = V4_HEADER_SIZE + config.saltLength + 4 + IV_LEN + 4 + ctArr.byteLength;
+                const blob = new Uint8Array(blobSize);
+                let off = 0;
+                blob.set(header, off); off += V4_HEADER_SIZE;
+                blob.set(salt, off); off += config.saltLength;
+                // chunk count = 1
+                blob[off] = 0; blob[off + 1] = 0; blob[off + 2] = 0; blob[off + 3] = 1; off += 4;
+                // chunk: iv + len + ciphertext
+                blob.set(chunkIv, off); off += IV_LEN;
+                const ctLen = ctArr.byteLength;
+                blob[off] = (ctLen >> 24) & 0xff; blob[off + 1] = (ctLen >> 16) & 0xff;
+                blob[off + 2] = (ctLen >> 8) & 0xff; blob[off + 3] = ctLen & 0xff; off += 4;
+                blob.set(ctArr, off);
 
                 wipeBuffer(salt);
-                wipeBuffer(iv);
+                wipeBuffer(chunkIv);
                 wipeBuffer(textData);
 
                 const bytes = new Uint8Array(blob.buffer);
@@ -287,14 +353,19 @@ async function decryptV4File(view: Uint8Array, password: string, id: string, ori
     const header = view.slice(0, V4_HEADER_SIZE);
     const kdfByte = header[1];
     const saltLen = header[3];
-    const ivLen = header[4];
     const argon2Mem = (header[5] << 24) | (header[6] << 16) | (header[7] << 8) | header[8];
     const argon2Passes = (header[9] >> 4) & 0x0f;
     const argon2Para = header[9] & 0x0f;
 
-    const salt = view.slice(V4_HEADER_SIZE, V4_HEADER_SIZE + saltLen);
-    const iv = view.slice(V4_HEADER_SIZE + saltLen, V4_HEADER_SIZE + saltLen + ivLen);
-    const ciphertext = view.slice(V4_HEADER_SIZE + saltLen + ivLen);
+    let offset = V4_HEADER_SIZE;
+    const salt = view.slice(offset, offset + saltLen); offset += saltLen;
+
+    // Read chunk count (4 bytes BE)
+    if (view.length < offset + 4) throw new Error("⛔ Truncated v4 blob — missing chunk count");
+    const numChunks = (view[offset] << 24) | (view[offset + 1] << 16) | (view[offset + 2] << 8) | view[offset + 3];
+    offset += 4;
+
+    if (numChunks < 1 || numChunks > 100_000) throw new Error("⛔ Invalid chunk count");
 
     const decConfig: WorkerCryptoConfig = {
         algorithm: "AES-256-GCM",
@@ -304,26 +375,66 @@ async function decryptV4File(view: Uint8Array, password: string, id: string, ori
         argon2Parallelism: argon2Para,
         iterations: 1_000_000,
         saltLength: saltLen,
-        ivLength: ivLen,
+        ivLength: IV_LEN,
         hashAlgorithm: "SHA-512",
     };
 
     const kdfLabel = decConfig.kdf === "argon2id" ? `Argon2id (${(argon2Mem / 1024).toFixed(0)} MiB)` : "PBKDF2";
-    _workerCtx.postMessage({ id, stage: "deriving-key", progress: 10, message: `Deriving key: ${kdfLabel}...` });
+    _workerCtx.postMessage({ id, stage: "deriving-key", progress: 5, message: `Deriving key: ${kdfLabel}...` });
 
     const key = await deriveKey(password, salt, decConfig);
-    _workerCtx.postMessage({ id, stage: "decrypting", progress: 40, message: "Decrypting AES-256-GCM (AAD-verified)..." });
+    _workerCtx.postMessage({ id, stage: "decrypting", progress: 15, message: `Decrypting ${numChunks} chunk(s)...` });
+
+    const plaintextParts: ArrayBuffer[] = [];
+    let totalPlaintext = 0;
 
     try {
-        const plaintext = await crypto.subtle.decrypt(
-            { name: "AES-GCM", iv: iv.buffer as ArrayBuffer, additionalData: header.buffer as ArrayBuffer },
-            key,
-            ciphertext.buffer as ArrayBuffer
+        for (let i = 0; i < numChunks; i++) {
+            if (offset + IV_LEN + 4 > view.length) throw new Error(`⛔ Truncated chunk ${i}`);
+            const chunkIv = view.slice(offset, offset + IV_LEN); offset += IV_LEN;
+            const ctLen = (view[offset] << 24) | (view[offset + 1] << 16) | (view[offset + 2] << 8) | view[offset + 3];
+            offset += 4;
+            if (offset + ctLen > view.length) throw new Error(`⛔ Truncated chunk ${i} ciphertext`);
+            const chunkCt = view.slice(offset, offset + ctLen); offset += ctLen;
+
+            // Per-chunk AAD: header || chunk_index(4 bytes BE)
+            const aad = new Uint8Array(V4_HEADER_SIZE + 4);
+            aad.set(header, 0);
+            aad[V4_HEADER_SIZE] = (i >> 24) & 0xff;
+            aad[V4_HEADER_SIZE + 1] = (i >> 16) & 0xff;
+            aad[V4_HEADER_SIZE + 2] = (i >> 8) & 0xff;
+            aad[V4_HEADER_SIZE + 3] = i & 0xff;
+
+            const pt = await crypto.subtle.decrypt(
+                { name: "AES-GCM", iv: chunkIv.buffer as ArrayBuffer, additionalData: aad.buffer as ArrayBuffer },
+                key,
+                chunkCt.buffer as ArrayBuffer
+            );
+            wipeBuffer(chunkIv); wipeBuffer(chunkCt);
+            plaintextParts.push(pt);
+            totalPlaintext += pt.byteLength;
+
+            const pct = 15 + Math.round(((i + 1) / numChunks) * 80);
+            _workerCtx.postMessage({ id, stage: "decrypting", progress: pct, message: `Decrypted chunk ${i + 1}/${numChunks}` });
+        }
+
+        // Combine plaintext parts
+        const combined = new Uint8Array(totalPlaintext);
+        let cOffset = 0;
+        for (const part of plaintextParts) {
+            combined.set(new Uint8Array(part), cOffset);
+            cOffset += part.byteLength;
+            wipeBuffer(part);
+        }
+
+        wipeBuffer(salt); wipeBuffer(originalData);
+        _workerCtx.postMessage(
+            { id, stage: "done", progress: 100, message: "Decryption complete", result: combined.buffer },
+            { transfer: [combined.buffer] }
         );
-        wipeBuffer(salt); wipeBuffer(iv); wipeBuffer(ciphertext); wipeBuffer(originalData);
-        _workerCtx.postMessage({ id, stage: "done", progress: 100, message: "Decryption complete", result: plaintext }, { transfer: [plaintext] });
-    } catch {
-        wipeBuffer(salt); wipeBuffer(iv); wipeBuffer(ciphertext);
+    } catch (err) {
+        wipeBuffer(salt);
+        if (err instanceof Error && err.message.startsWith("⛔")) throw err;
         throw new Error("Decryption failed. Wrong password, tampered header, or corrupted file.");
     }
 }
@@ -334,14 +445,16 @@ async function decryptV4Text(view: Uint8Array, password: string, id: string, byt
     const header = view.slice(0, V4_HEADER_SIZE);
     const kdfByte = header[1];
     const saltLen = header[3];
-    const ivLen = header[4];
     const argon2Mem = (header[5] << 24) | (header[6] << 16) | (header[7] << 8) | header[8];
     const argon2Passes = (header[9] >> 4) & 0x0f;
     const argon2Para = header[9] & 0x0f;
 
-    const salt = view.slice(V4_HEADER_SIZE, V4_HEADER_SIZE + saltLen);
-    const iv = view.slice(V4_HEADER_SIZE + saltLen, V4_HEADER_SIZE + saltLen + ivLen);
-    const ciphertext = view.slice(V4_HEADER_SIZE + saltLen + ivLen);
+    let offset = V4_HEADER_SIZE;
+    const salt = view.slice(offset, offset + saltLen); offset += saltLen;
+
+    // Read chunk count
+    const numChunks = (view[offset] << 24) | (view[offset + 1] << 16) | (view[offset + 2] << 8) | view[offset + 3];
+    offset += 4;
 
     const decConfig: WorkerCryptoConfig = {
         algorithm: "AES-256-GCM",
@@ -351,25 +464,54 @@ async function decryptV4Text(view: Uint8Array, password: string, id: string, byt
         argon2Parallelism: argon2Para,
         iterations: 1_000_000,
         saltLength: saltLen,
-        ivLength: ivLen,
+        ivLength: IV_LEN,
         hashAlgorithm: "SHA-512",
     };
 
     const key = await deriveKey(password, salt, decConfig);
     _workerCtx.postMessage({ id, stage: "decrypting", progress: 50, message: "Decrypting AES-256-GCM (AAD-verified)..." });
 
+    const plaintextParts: ArrayBuffer[] = [];
+    let totalPlaintext = 0;
+
     try {
-        const plaintext = await crypto.subtle.decrypt(
-            { name: "AES-GCM", iv: iv.buffer as ArrayBuffer, additionalData: header.buffer as ArrayBuffer },
-            key,
-            ciphertext.buffer as ArrayBuffer
-        );
+        for (let i = 0; i < numChunks; i++) {
+            const chunkIv = view.slice(offset, offset + IV_LEN); offset += IV_LEN;
+            const ctLen = (view[offset] << 24) | (view[offset + 1] << 16) | (view[offset + 2] << 8) | view[offset + 3];
+            offset += 4;
+            const chunkCt = view.slice(offset, offset + ctLen); offset += ctLen;
+
+            const aad = new Uint8Array(V4_HEADER_SIZE + 4);
+            aad.set(header, 0);
+            aad[V4_HEADER_SIZE] = (i >> 24) & 0xff;
+            aad[V4_HEADER_SIZE + 1] = (i >> 16) & 0xff;
+            aad[V4_HEADER_SIZE + 2] = (i >> 8) & 0xff;
+            aad[V4_HEADER_SIZE + 3] = i & 0xff;
+
+            const pt = await crypto.subtle.decrypt(
+                { name: "AES-GCM", iv: chunkIv.buffer as ArrayBuffer, additionalData: aad.buffer as ArrayBuffer },
+                key,
+                chunkCt.buffer as ArrayBuffer
+            );
+            wipeBuffer(chunkIv); wipeBuffer(chunkCt);
+            plaintextParts.push(pt);
+            totalPlaintext += pt.byteLength;
+        }
+
+        const combined = new Uint8Array(totalPlaintext);
+        let cOffset = 0;
+        for (const part of plaintextParts) {
+            combined.set(new Uint8Array(part), cOffset);
+            cOffset += part.byteLength;
+            wipeBuffer(part);
+        }
+
         const decoder = new TextDecoder();
-        const text = decoder.decode(plaintext);
-        wipeBuffer(salt); wipeBuffer(iv); wipeBuffer(ciphertext); wipeBuffer(bytes); wipeBuffer(plaintext);
+        const text = decoder.decode(combined);
+        wipeBuffer(salt); wipeBuffer(bytes); wipeBuffer(combined);
         _workerCtx.postMessage({ id, stage: "done", progress: 100, message: "Decryption complete", result: text });
     } catch {
-        wipeBuffer(salt); wipeBuffer(iv); wipeBuffer(ciphertext); wipeBuffer(bytes);
+        wipeBuffer(salt); wipeBuffer(bytes);
         throw new Error("Decryption failed. Wrong password, tampered header, or corrupted text.");
     }
 }
