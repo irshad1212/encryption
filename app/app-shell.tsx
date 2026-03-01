@@ -13,6 +13,8 @@ import {
     Sun,
     Moon,
     Monitor,
+    ChevronRight,
+    Home,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
@@ -89,6 +91,29 @@ function ThemeToggle() {
     );
 }
 
+function Breadcrumbs() {
+    const pathname = usePathname();
+    const current = navItems.find((item) => item.href === pathname);
+
+    if (pathname === "/") return null;
+
+    return (
+        <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+            <Link href="/" className="flex items-center gap-1 hover:text-foreground transition-colors">
+                <Home className="h-3.5 w-3.5" />
+                <span>Dashboard</span>
+            </Link>
+            <ChevronRight className="h-3.5 w-3.5" />
+            {current && (
+                <span className="font-medium text-foreground flex items-center gap-1.5">
+                    <current.icon className="h-3.5 w-3.5" />
+                    {current.label}
+                </span>
+            )}
+        </div>
+    );
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
     const [open, setOpen] = useState(false);
     const [mounted, setMounted] = useState(false);
@@ -98,19 +123,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }, []);
 
     return (
-        <div className="flex min-h-screen">
-            {/* Desktop Sidebar */}
-            <aside className="hidden lg:flex lg:w-64 lg:flex-col border-r border-border bg-card">
-                <div className="flex h-14 items-center px-6 border-b border-border">
+        <div className="flex h-screen overflow-hidden">
+            {/* Desktop Sidebar — sticky, full height */}
+            <aside className="hidden lg:flex lg:w-64 lg:flex-col border-r border-border bg-card h-screen sticky top-0">
+                <div className="flex h-14 shrink-0 items-center px-6 border-b border-border">
                     <Link href="/" className="flex items-center gap-2">
                         <Shield className="h-5 w-5" />
                         <span className="font-semibold tracking-tight">Encryption</span>
                     </Link>
                 </div>
-                <div className="flex-1 px-3 py-4">
+                <div className="flex-1 overflow-y-auto px-3 py-4">
                     <NavLinks />
                 </div>
-                <div className="border-t border-border px-3 py-3">
+                <div className="border-t border-border px-3 py-3 shrink-0">
                     <div className="flex items-center justify-between px-3">
                         <span className="text-xs text-muted-foreground">
                             Zero-Knowledge
@@ -121,9 +146,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </aside>
 
             {/* Main content area */}
-            <div className="flex flex-1 flex-col">
-                {/* Mobile Header */}
-                <header className="flex h-14 items-center gap-4 border-b border-border bg-card px-4 lg:px-6">
+            <div className="flex flex-1 flex-col overflow-hidden">
+                {/* Header — sticky */}
+                <header className="flex h-14 shrink-0 items-center gap-4 border-b border-border bg-card px-4 lg:px-6 sticky top-0 z-30">
                     <Sheet open={open} onOpenChange={setOpen}>
                         <SheetTrigger asChild>
                             <Button variant="ghost" size="icon" className="lg:hidden h-8 w-8">
@@ -156,13 +181,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         <span className="font-semibold tracking-tight">Encryption</span>
                     </div>
 
+                    {/* Breadcrumbs — desktop only */}
+                    <div className="hidden lg:block">
+                        <Breadcrumbs />
+                    </div>
+
                     <div className="ml-auto flex items-center gap-2">
                         {mounted && <div className="lg:hidden"><ThemeToggle /></div>}
                     </div>
                 </header>
 
-                {/* Page content */}
-                <main className="flex-1 overflow-auto">
+                {/* Page content — scrollable area under sticky header */}
+                <main className="flex-1 overflow-y-auto">
                     <div className="mx-auto max-w-5xl px-4 py-8 lg:px-8">{children}</div>
                 </main>
             </div>
