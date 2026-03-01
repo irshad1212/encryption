@@ -1,0 +1,9 @@
+Make the KDF memory‑hard and non‑tunable downward: replace PBKDF2 with Argon2id (e.g., 64–128 MiB, 3–4 iterations, parallelism 2–4) and remove sliders that allow weakening (lib/crypto-config.ts, app/encrypt/page.tsx).
+Enforce long, high‑entropy input only: passphrase‑only (≥5 Diceware words) or ≥16–20 chars with measured entropy ≥80 bits; reject anything weaker at submit time (encrypt/decrypt pages).
+Authenticate everything: include the blob header as AES‑GCM AAD so tampering is detected before decryption (lib/crypto.ts, workers/crypto.worker.ts); refuse unknown versions early.
+Fix decryption DoS: apply the same dynamic max‑file check before file.arrayBuffer() on decrypt and support streaming/chunked decrypt to keep RAM bounded (app/decrypt/page.tsx, worker).
+Zero sensitive data everywhere: wipe plaintext buffers and password state after both worker and non‑worker paths; avoid long‑lived React state for ciphertext/plaintext (encrypt/decrypt/text pages).
+Remove low‑security options: drop AES‑128/192 and weaker hash presets; ship only AES‑256‑GCM with a single vetted config to prevent misconfiguration.
+Hardware‑backed second factor: optionally gate key‑unwrap with a platform authenticator (WebAuthn) so an offline attacker needs both password and device.
+Supply‑chain integrity: pin dependencies, use npm ci --ignore-scripts, enable Subresource Integrity for static assets, and sign release bundles (hash manifest checked at runtime).
+Client hardening: set strict CSP, COOP/COEP, disable clipboard writes of secrets, and ensure service worker caches only whitelisted paths (public/service-worker.js).

@@ -1,0 +1,28 @@
+{
+    "name": "Encryption",
+    "short_name": "Encryption",
+    "description": "Zero-knowledge, client-side AES-256-GCM encryption. Your data never leaves your browser.",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#000000",
+    "theme_color": "#000000",
+    "orientation": "portrait-primary",
+    "categories": [
+        "utilities",
+        "security"
+    ],
+    "icons": [
+        {
+            "src": "/icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "any maskable"
+        },
+        {
+            "src": "/icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any maskable"
+        }
+    ]
+}

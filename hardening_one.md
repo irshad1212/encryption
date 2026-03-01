@@ -1,0 +1,7 @@
+Enforce strong KDF defaults: switch PBKDF2 to a minimum of ~1,000,000 iterations and remove the slider floor below that; or better, migrate to Argon2id (e.g., 64–128 MiB memory, 3–4 iterations) via WASM and make it the only option for passwords. (Current adjustable floor of 100k in app/encrypt/page.tsx and lib/crypto-config.ts weakens security.)
+Fix unauthenticated header metadata: include the header bytes (version, config, lengths, iteration count) as AES-GCM AAD during encrypt/decrypt so any tampering is detected before decryption. (Header is currently read without authentication in lib/crypto.ts and workers/crypto.worker.ts.)
+Add a hard password policy: require ≥16 chars with at least 80 bits estimated entropy, reject weak inputs, and default the in-app generator to that floor. Strength meter alone is insufficient.
+Eliminate low-security configuration choices: remove AES-128/192 and SHA-256/384 options, keeping only AES-256-GCM with SHA-512 (or Argon2id) to avoid user misconfiguration.
+Guard decryption the same as encryption: apply the dynamic max file-size check before file.arrayBuffer() on decrypt, and prefer streaming/chunked decrypt to avoid RAM spikes and DoS.
+Zero sensitive data everywhere: after non-worker paths, overwrite plaintext buffers and clear password state; avoid keeping Base64 ciphertext/plaintext in React state longer than needed.
+Pinned format versioning: reject unknown versions early and display a clear “unsupported or tampered blob” message to reduce oracle usefulness.

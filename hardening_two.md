@@ -1,0 +1,2 @@
+Offer passphrase-only mode (e.g., 5+ Diceware words) and disallow shorter passwords.
+Add an optional second factor (local hardware WebAuthn-secret unwrapped with the password) to raise offline-crack cost if the device is available.

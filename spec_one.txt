@@ -1,0 +1,177 @@
+PROJECT TITLE: Offline Client-Side File & Text Encryption Web App (Zero-Knowledge, Air-Gapped)
+
+OBJECTIVE:
+Build a fully client-side encryption web application using Next.js (static export) that performs all cryptographic operations in the browser. The application must work 100% offline after the first load and must never send plaintext, passwords, or keys to any server.
+
+CORE REQUIREMENTS:
+
+1. OFFLINE CAPABILITY
+
+* Implement as a PWA with service worker and full asset caching
+* After first load, the app must function without internet
+* No network calls during encryption/decryption
+* No analytics, telemetry, or external CDN usage
+
+2. ZERO-KNOWLEDGE ARCHITECTURE
+
+* All encryption and decryption must occur in the browser using Web Crypto API
+* Server (if any) must only serve static files
+* No API routes for crypto operations
+* No password, key, or file data may leave the client
+
+3. CRYPTOGRAPHY SPECIFICATION
+   Algorithm:
+
+* AES-256-GCM for encryption/decryption
+
+Key Derivation:
+
+* PBKDF2 with:
+
+  * SHA-256
+  * 250,000+ iterations
+  * 16-byte random salt per operation
+
+IV:
+
+* 12-byte random IV per encryption
+
+Output Blob Format (binary):
+[version:1 byte]
+[salt:16 bytes]
+[iv:12 bytes]
+[ciphertext:remaining bytes]
+
+Text encryption output:
+
+* Base64 encoded blob
+
+Security rules:
+
+* Never reuse IV with same key
+* Do not store keys in localStorage/sessionStorage
+* Keep key only in memory
+* Wipe sensitive buffers after use
+
+4. FEATURES
+
+FILE ENCRYPTION:
+
+* User selects file
+* User enters password
+* Encrypt locally
+* Download encrypted .blob file
+
+FILE DECRYPTION:
+
+* User uploads encrypted blob
+* User enters password
+* Decrypt locally
+* Download original file with original filename
+
+TEXT ENCRYPTION:
+
+* Input text → encrypt → output Base64 blob
+
+TEXT DECRYPTION:
+
+* Input Base64 blob → decrypt → output plaintext
+
+5. LARGE FILE SUPPORT
+
+* Use streaming or chunked processing where possible
+* Show progress bar for files > 50MB
+* Avoid loading entire file into memory if feasible
+
+6. UI/UX REQUIREMENTS
+
+* Drag & drop file support
+* Password strength meter
+* Show warnings:
+  “No password recovery”
+  “Losing the blob or password means permanent data loss”
+* Toggle:
+  Show/Hide password
+* Operation status:
+  idle / deriving key / encrypting / decrypting / done
+
+7. PERFORMANCE
+
+* Use Web Workers for crypto to avoid blocking UI
+* Use transferable ArrayBuffers
+* Optimize for files up to at least 500MB
+
+8. PROJECT STRUCTURE
+
+Next.js (App Router):
+/app
+/encrypt
+/decrypt
+/text
+/components
+/workers/crypto.worker.ts
+/lib/crypto.ts
+/public
+manifest.json
+service-worker.js
+
+9. PWA REQUIREMENTS
+
+* Cache all JS/CSS/fonts on first load
+* Offline fallback page
+* Installable manifest
+* Versioned cache invalidation
+
+10. TESTING REQUIREMENTS
+    Create test cases for:
+
+* Small file encryption/decryption
+* Large file (100MB+) encryption/decryption
+* Wrong password handling (must fail gracefully)
+* Corrupted blob detection
+* Offline mode functionality
+
+11. SECURITY AUDIT CHECKLIST
+
+* No console logging of sensitive data
+* No plaintext in memory after completion (overwrite buffers)
+* CSP headers compatible with static hosting
+* Disable clipboard auto-copy of secrets
+
+12. DELIVERABLES
+
+* Fully working Next.js project
+* Static export compatible (next export)
+* Clear README with:
+
+  * Security model
+  * Threat model
+  * Limitations
+  * Usage instructions
+* No backend required
+
+13. NON-GOALS
+
+* No user accounts
+* No cloud storage
+* No key recovery mechanism
+* No device fingerprint–only keys (password required)
+
+SUCCESS CRITERIA:
+
+* App works after disconnecting internet
+* Encrypted files cannot be decrypted without correct password
+* Server never receives sensitive data
+* Works in latest Chrome, Firefox, Edge
+
+IMPLEMENTATION PRIORITY ORDER:
+
+1. Crypto module (PBKDF2 + AES-GCM)
+2. File encrypt/decrypt flow
+3. Text encrypt/decrypt
+4. Web Worker integration
+5. PWA offline caching
+6. UI polish and progress indicators
+7. Security hardening
+
+END OF SPEC

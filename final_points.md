@@ -1,0 +1,5 @@
+Replace PBKDF2 with Argon2id (WASM): add Argon2id KDF in lib/crypto.ts/workers/crypto.worker.ts, keep PBKDF2 only for legacy decrypt, update lib/crypto-config.ts defaults and UI sliders to remove “lower” options.
+Stream/chunk file encrypt/decrypt: slice File/ArrayBuffer in app/encrypt/page.tsx and app/decrypt/page.tsx, process chunks in the worker (encrypt/decrypt) to keep RAM bounded and resist DoS on big blobs.
+Harden runtime headers: add strict CSP, COOP/COEP, Referrer-Policy, Permissions-Policy, and HSTS in next.config.ts (or public/_headers) to reduce XSS/XS-Leak and cross-origin side channels.
+Supply-chain integrity: enforce npm ci --ignore-scripts, commit package-lock.json, add integrity/SRI for static assets, and fail CI on unsigned/changed dependencies.
+Secrets lifecycle: aggressively wipe React state/buffers after each operation (encrypt/decrypt/text pages), avoid storing ciphertext/plaintext in state longer than needed, and zero temporary arrays in non-worker paths.
