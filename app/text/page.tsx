@@ -136,6 +136,26 @@ export default function TextPage() {
         }
     }, [encOutput, decOutput]);
 
+    // Auto-detect secret key flag from base64 ciphertext header
+    useEffect(() => {
+        if (!ciphertext || ciphertext.length < 16) {
+            setDecSecretKeyDetected(false);
+            return;
+        }
+        try {
+            const cleanBase64 = ciphertext.replace(/[^A-Za-z0-9+/=]/g, "").substring(0, 20);
+            if (cleanBase64.length < 16) return;
+            const decodedStr = atob(cleanBase64);
+            if (decodedStr.length >= 10 && decodedStr.charCodeAt(0) === 4) {
+                setDecSecretKeyDetected(hasBackupKeyFlag(decodedStr.charCodeAt(2)));
+            } else {
+                setDecSecretKeyDetected(false);
+            }
+        } catch (err) {
+            setDecSecretKeyDetected(false);
+        }
+    }, [ciphertext]);
+
     const handleGeneratePassword = () => setGenPassword(generatePassword(genConfig));
     const handleGeneratePassphrase = () => setDicewareResult(generatePassphrase(dicewareWords).passphrase);
     const handleUseGenerated = (pw: string) => {
